@@ -4,7 +4,9 @@ import hashlib
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
+import zipfile
 from time import sleep, time
 import time
 from zipfile import ZipFile
@@ -66,7 +68,7 @@ def run_cmd(cmd, raise_exception=True):
     return ret, output
 
 
-def process_file(file: ET.Element, moodle_dir):
+def process_file(file: ET.Element, vlc_path, moodle_dir):
     try:
         # check if we have a convertable media file
         if file.find("mimetype").text == "audio/ogg":
@@ -82,15 +84,16 @@ def process_file(file: ET.Element, moodle_dir):
             # build vlc command for conversion of file
             mp3_path = content_hash_basename + ".mp3"
             print("converting {} to {} in {}".format(content_hash_basename, mp3_path, content_hash_dir))
-            cmd = vlc_path + " -I dummy vlc://quit " + content_hash_basename
+            cmd = vlc_path + " -I dummy " + content_hash_basename
             cmd = cmd + " --sout=#transcode{acodec=mp3,channels=2,samplerate=44100}:standard{"
-            cmd = cmd + "access=file,mux=raw,dst=" + mp3_path + "}"
+            cmd = cmd + "access=file,mux=raw,dst=" + mp3_path + "} vlc://quit"
 
             # cd to dir to run the command
             os.chdir(content_hash_dir)
             if os.path.exists(mp3_path):
                 os.remove(mp3_path)
             ret, _ = run_cmd(cmd)
+            os.remove(content_hash_basename)
 
             # modify the current file ElementTree Item
             mp3_content_hash = hash(mp3_path)
@@ -98,7 +101,8 @@ def process_file(file: ET.Element, moodle_dir):
             file_name_before = file.find("filename").text
             new_file_name = os.path.splitext(file_name_before)[0] + ".mp3"
             file.find("filename").text = new_file_name
-            file.find("filesize").text = str(os.path.getsize(mp3_path))
+            size = os.path.getsize(mp3_path)
+            file.find("filesize").text = str(size)
             file.find("timemodified").text = str(int(time.time()))
             file.find("mimetype").text = "audio/mp3"
 
@@ -111,21 +115,74 @@ def process_file(file: ET.Element, moodle_dir):
     except Exception as e:
         print("exception while processing: {}".format(str(e)))
 
+def zipdir(path, ziph):
+    # ziph is zipfile handle
+    for root, dirs, files in os.walk(path):
+        for file in files:
+            ziph.write(os.path.join(root, file), os.path.relpath(os.path.join(root, file), os.path.join(path, '..')))
 
 if __name__ == "__main__":
-    # extract moodle data
-    moodle_backup_file = "var/sicherung-moodle2-activity-1381-lesson1381-20210110-0919.mbz"
-    # extract
-    seven_zip = '"C:/Program Files/7-Zip/7z.exe"'
-    run_cmd(seven_zip + " e -y -o " + os.path.dirname(moodle_backup_file) + " " + moodle_backup_file)
-    moodle_dir = os.path.splitext(os.path.basename(moodle_backup_file))[0]
-    files_file = moodle_dir + "/files.xml"
-    vlc_path = '"C:/Program Files/VideoLAN/VLC/vlc.exe"'
+    # args
+    parser = argparse.ArgumentParser(
+        description='A utility to convert moodle backup files')
+    parser.add_argument('moodle_backup_file', type=str, help='moodle_backup_file')
+    parser.add_argument('--seven_zip', type=str, default=None, help='path to the 7-Zip executable')
+    parser.add_argument('--vlc', type=str, default=None, help='path to the vlc executable')
+    parser.add_argument('--no_clean', action='store_true', default=False, help='path to the vlc executable')
 
+    args = parser.parse_args()
+
+    # extract moodle data
+    moodle_backup_file = args.moodle_backup_file
+    dir = os.path.dirname(moodle_backup_file)
+    moodle_backup_file = os.path.basename(moodle_backup_file)
+    # extract
+    seven_zip = args.seven_zip
+    if seven_zip is None:
+        if os.path.exists('C:\\Program Files\\7-Zip\\7z.exe'):
+            seven_zip = '"C:\\Program Files\\7-Zip\\7z.exe"'
+    os.chdir(dir)
+    run_cmd(seven_zip + " e -y " + moodle_backup_file)
+    moodle_file_name = os.path.splitext(moodle_backup_file)[0]
+    run_cmd(seven_zip + " x -y -o* " + moodle_file_name)
+    moodle_dir = os.path.abspath(moodle_file_name + "~")
+    sleep(2)
+
+    os.chdir(moodle_dir)
     # parse the files xml file
-    tree = ET.parse(files_file)
+    tree = ET.parse("files.xml")
+
+    vlc_path = args.vlc
+    if vlc_path is None:
+        if os.path.exists('C:\\Program Files (x86)\\VideoLAN\\VLC\\vlc.exe'):
+            vlc_path = '"C:\\Program Files (x86)\\VideoLAN\\VLC\\vlc.exe"'
+        elif os.path.exists('C:\\Program Files\\VideoLAN\\VLC\\vlc.exe'):
+            vlc_path = '"C:\\Program Files\\VideoLAN\\VLC\\vlc.exe"'
+
     for file in tree.getroot():
-        process_file(file, moodle_dir)
+        process_file(file, vlc_path, moodle_dir)
 
     # write the file again
-    tree.write(os.path.dirname(files_file) + "/files2.xml")
+    os.chdir(moodle_dir)
+    tree.write("files.xml")
+    #os.chdir(os.path.dirname(moodle_dir))
+    #os.remove(moodle_file_name)
+    #run_cmd(seven_zip + " a " + moodle_file_name + ".zip " + moodle_dir + "/*")
+    zipf = zipfile.ZipFile("../"+moodle_file_name+'.zip', 'w', zipfile.ZIP_DEFLATED)
+    for root, dirs, files in os.walk("."):
+        for file in files:
+            zipf.write(root+"/"+file, root+"/"+file)
+    zipf.close()
+    os.chdir(os.path.dirname(moodle_dir))
+    shutil.move(moodle_file_name + ".zip", moodle_file_name)
+
+    #run_cmd(seven_zip + " a " + moodle_file_name + ".zip " + moodle_file_name)
+    zipf = zipfile.ZipFile(moodle_file_name+'.zip', 'w', zipfile.ZIP_DEFLATED)
+    zipf.write(moodle_file_name, moodle_file_name)
+    zipf.close()
+    shutil.move(moodle_file_name + ".zip", moodle_file_name + ".new.mbz")
+
+    # clean up
+    if args.no_clean == False:
+        shutil.rmtree(moodle_dir)
+        os.remove(moodle_file_name)

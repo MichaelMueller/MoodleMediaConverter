@@ -4,9 +4,11 @@ import hashlib
 import os
 import shutil
 import subprocess
+import tempfile
 from time import sleep, time
 import time
-import portalocker as portalocker
+from zipfile import ZipFile
+import xml.etree.ElementTree as ET
 
 
 def find_file(name, path):
@@ -14,6 +16,7 @@ def find_file(name, path):
         if name in files:
             return os.path.join(root, name)
     return None
+
 
 def hash(file):
     BUF_SIZE = 65536
@@ -27,71 +30,102 @@ def hash(file):
         f.close()
     return "{0}".format(md5.hexdigest())
 
+
+def replace_in_files(dir, subject, replace, exts=[".xml", ".txt"]):
+    for root, dirs, files in os.walk(dir):
+        for file in files:
+            if os.path.splitext(file)[1] in exts:
+                replace_in_file(os.path.join(root, file), subject, replace)
+
+
 def replace_in_file(file, subject, replace):
-    # input file
-    fin = open(file, "rt")
-    # output file to write the result to
-    fout = open(file+".tmp", "wt")
-    # for each line in the input file
-    for line in fin:
-        # read replace the string and write to output file
-        fout.write(line.replace(subject, replace))
-    # close input and output files
-    fin.close()
-    fout.close()
-    shutil.move(file+".tmp", file)
-    os.remove(file+".tmp")
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        # input file
+        fin = open(file, "rt")
+        # output file to write the result to
+        path = os.path.join(tmp_dir, os.path.basename(file))
+        fout = open(path, "wt")
+        # for each line in the input file
+        for line in fin:
+            # read replace the string and write to output file
+            fout.write(line.replace(subject, replace))
+        # close input and output files
+        fin.close()
+        fout.close()
+        shutil.move(path, file)
 
-if __name__ == "__main__":
-    moodle_bkp_dir = "C:/Users/mueller/Desktop/git/MoodleMediaConverter/var/sicherung-moodle2-activity-1381-lesson1381-20210110-0919~"
-    files_file = moodle_bkp_dir + "/files.xml"
 
-    import xml.etree.ElementTree as ET
+def run_cmd(cmd, raise_exception=True):
+    print("running command {}".format(cmd))
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    output, _ = process.communicate()
+    ret = process.returncode
 
-    files_path = moodle_bkp_dir + "/files"
-    vlc_path = '"C:/Program Files/VideoLAN/VLC/vlc.exe"'
-    timeout = 10000
-    ogg_files = []
-    tree = ET.parse(files_file)
-    for file in tree.getroot():
+    if raise_exception and ret != 0:
+        raise Exception("error running command {}. output was: {}".format(cmd, output))
+    return ret, output
+
+
+def process_file(file: ET.Element, moodle_dir):
+    try:
+        # check if we have a convertable media file
         if file.find("mimetype").text == "audio/ogg":
 
-            try:
-                contenthash = file.find("contenthash").text
-                # media_file_path = file_path.format(file.find("itemid").text, file.find("contenthash").text)
-                contenthash_file = find_file(contenthash, files_path)
-                contenthash_basename = os.path.basename(contenthash_file)
-                contenthash_file_dir = os.path.dirname(contenthash_file)
-                if not os.path.exists(contenthash_file):
-                    print("file {} does not exist. skipping.".format(contenthash_file))
-                    continue
-                mp3_path = contenthash_basename + ".mp3"
+            # get content hash and its corresponding file
+            content_hash = file.find("contenthash").text
+            content_hash_path = find_file(content_hash, moodle_dir)
+            if not os.path.exists(content_hash_path):
+                raise Exception("file {} does not exist. skipping.".format(content_hash_path))
+            content_hash_basename = os.path.basename(content_hash_path)
+            content_hash_dir = os.path.dirname(content_hash_path)
 
-                print("converting {} to {} in {}".format(contenthash_basename, mp3_path, contenthash_file_dir))
-                cmd = vlc_path + " -I dummy vlc://quit " + contenthash_basename
-                cmd = cmd + " --sout=#transcode{acodec=mp3,channels=2,samplerate=44100}:standard{"
-                cmd = cmd + "access=file,mux=raw,dst=" + mp3_path + "}"
-                print("cmd: {}".format(cmd))
-                os.chdir(contenthash_file_dir)
-                if os.path.exists(mp3_path):
-                    os.remove(mp3_path)
-                process = subprocess.Popen(cmd)
-                process.communicate()
-                if process.returncode != 0:
-                    raise Exception("error using vlc converter on {}".format(contenthash_basename))
+            # build vlc command for conversion of file
+            mp3_path = content_hash_basename + ".mp3"
+            print("converting {} to {} in {}".format(content_hash_basename, mp3_path, content_hash_dir))
+            cmd = vlc_path + " -I dummy vlc://quit " + content_hash_basename
+            cmd = cmd + " --sout=#transcode{acodec=mp3,channels=2,samplerate=44100}:standard{"
+            cmd = cmd + "access=file,mux=raw,dst=" + mp3_path + "}"
 
-                filename = os.path.splitext(file.find("filename").text)[0] + ".mp3"
-                filesize = os.path.getsize(mp3_path)
-                timemodified = time.time()
-                mimetype = "audio/mp3"
-                contenthash = hash(mp3_path)
-                shutil.move(mp3_path, contenthash)
-                file.find("contenthash").text = contenthash
-                file.find("filename").text = filename
-                file.find("filesize").text = str(filesize)
-                file.find("timemodified").text = str(timemodified)
-                file.find("mimetype").text = mimetype
-            except Exception as e:
-                print("exception while processing files: {}".format(str(e)))
+            # cd to dir to run the command
+            os.chdir(content_hash_dir)
+            if os.path.exists(mp3_path):
+                os.remove(mp3_path)
+            ret, _ = run_cmd(cmd)
 
-    tree.write(os.path.dirname(files_file)+"/files2.xml")
+            # modify the current file ElementTree Item
+            mp3_content_hash = hash(mp3_path)
+            file.find("contenthash").text = mp3_content_hash
+            file_name_before = file.find("filename").text
+            new_file_name = os.path.splitext(file_name_before)[0] + ".mp3"
+            file.find("filename").text = new_file_name
+            file.find("filesize").text = str(os.path.getsize(mp3_path))
+            file.find("timemodified").text = str(int(time.time()))
+            file.find("mimetype").text = "audio/mp3"
+
+            # actually move the item
+            shutil.move(mp3_path, mp3_content_hash)
+
+            # replace the occurence in all files
+            replace_in_files(moodle_dir, file_name_before, new_file_name)
+
+    except Exception as e:
+        print("exception while processing: {}".format(str(e)))
+
+
+if __name__ == "__main__":
+    # extract moodle data
+    moodle_backup_file = "var/sicherung-moodle2-activity-1381-lesson1381-20210110-0919.mbz"
+    # extract
+    seven_zip = '"C:/Program Files/7-Zip/7z.exe"'
+    run_cmd(seven_zip + " e -y -o " + os.path.dirname(moodle_backup_file) + " " + moodle_backup_file)
+    moodle_dir = os.path.splitext(os.path.basename(moodle_backup_file))[0]
+    files_file = moodle_dir + "/files.xml"
+    vlc_path = '"C:/Program Files/VideoLAN/VLC/vlc.exe"'
+
+    # parse the files xml file
+    tree = ET.parse(files_file)
+    for file in tree.getroot():
+        process_file(file, moodle_dir)
+
+    # write the file again
+    tree.write(os.path.dirname(files_file) + "/files2.xml")

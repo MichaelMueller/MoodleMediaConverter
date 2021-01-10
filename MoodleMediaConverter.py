@@ -93,11 +93,12 @@ def process_file(file: ET.Element, vlc_path, moodle_dir):
             if os.path.exists(mp3_path):
                 os.remove(mp3_path)
             ret, _ = run_cmd(cmd)
-            os.remove(content_hash_basename)
+            shutil.move(mp3_path, content_hash_basename)
+            mp3_path = content_hash_basename
 
             # modify the current file ElementTree Item
-            mp3_content_hash = hash(mp3_path)
-            file.find("contenthash").text = mp3_content_hash
+            #mp3_content_hash = hash(mp3_path)
+            #file.find("contenthash").text = mp3_content_hash
             file_name_before = file.find("filename").text
             new_file_name = os.path.splitext(file_name_before)[0] + ".mp3"
             file.find("filename").text = new_file_name
@@ -107,7 +108,7 @@ def process_file(file: ET.Element, vlc_path, moodle_dir):
             file.find("mimetype").text = "audio/mp3"
 
             # actually move the item
-            shutil.move(mp3_path, mp3_content_hash)
+            # shutil.move(mp3_path, mp3_content_hash)
 
             # replace the occurence in all files
             replace_in_files(moodle_dir, file_name_before, new_file_name)
@@ -126,30 +127,25 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description='A utility to convert moodle backup files')
     parser.add_argument('moodle_backup_file', type=str, help='moodle_backup_file')
-    parser.add_argument('--seven_zip', type=str, default=None, help='path to the 7-Zip executable')
     parser.add_argument('--vlc', type=str, default=None, help='path to the vlc executable')
     parser.add_argument('--no_clean', action='store_true', default=False, help='path to the vlc executable')
 
     args = parser.parse_args()
 
     # extract moodle data
-    moodle_backup_file = args.moodle_backup_file
-    dir = os.path.dirname(moodle_backup_file)
-    moodle_backup_file = os.path.basename(moodle_backup_file)
+    bkp_file = args.moodle_backup_file
+    bkp_file_dir = os.path.abspath(os.path.dirname(bkp_file))
+    bkp_file_basename = os.path.basename(bkp_file)
+    bkp_file_name = os.path.splitext(bkp_file_basename)[0]
     # extract
-    seven_zip = args.seven_zip
-    if seven_zip is None:
-        if os.path.exists('C:\\Program Files\\7-Zip\\7z.exe'):
-            seven_zip = '"C:\\Program Files\\7-Zip\\7z.exe"'
-    os.chdir(dir)
-    run_cmd(seven_zip + " e -y " + moodle_backup_file)
-    moodle_file_name = os.path.splitext(moodle_backup_file)[0]
-    run_cmd(seven_zip + " x -y -o* " + moodle_file_name)
-    moodle_dir = os.path.abspath(moodle_file_name + "~")
+    os.chdir(bkp_file_dir)
+    os.makedirs(bkp_file_name)
+    run_cmd("tar -xvf "+bkp_file_basename+" -C "+bkp_file_name)
     sleep(2)
 
-    os.chdir(moodle_dir)
+    moodle_dir = os.path.abspath(bkp_file_name)
     # parse the files xml file
+    os.chdir(moodle_dir)
     tree = ET.parse("files.xml")
 
     vlc_path = args.vlc
@@ -165,24 +161,10 @@ if __name__ == "__main__":
     # write the file again
     os.chdir(moodle_dir)
     tree.write("files.xml")
-    #os.chdir(os.path.dirname(moodle_dir))
-    #os.remove(moodle_file_name)
-    #run_cmd(seven_zip + " a " + moodle_file_name + ".zip " + moodle_dir + "/*")
-    zipf = zipfile.ZipFile("../"+moodle_file_name+'.zip', 'w', zipfile.ZIP_DEFLATED)
-    for root, dirs, files in os.walk("."):
-        for file in files:
-            zipf.write(root+"/"+file, root+"/"+file)
-    zipf.close()
-    os.chdir(os.path.dirname(moodle_dir))
-    shutil.move(moodle_file_name + ".zip", moodle_file_name)
-
-    #run_cmd(seven_zip + " a " + moodle_file_name + ".zip " + moodle_file_name)
-    zipf = zipfile.ZipFile(moodle_file_name+'.zip', 'w', zipfile.ZIP_DEFLATED)
-    zipf.write(moodle_file_name, moodle_file_name)
-    zipf.close()
-    shutil.move(moodle_file_name + ".zip", moodle_file_name + ".new.mbz")
+    run_cmd("tar -cvzf " + bkp_file_name + ".mbz *")
+    shutil.move(bkp_file_name + ".mbz", "../"+bkp_file_name + ".mbz")
+    os.chdir(os.path.dirname(bkp_file_dir))
 
     # clean up
     if args.no_clean == False:
         shutil.rmtree(moodle_dir)
-        os.remove(moodle_file_name)

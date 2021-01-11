@@ -139,7 +139,8 @@ if __name__ == "__main__":
     bkp_file_name = os.path.splitext(bkp_file_basename)[0]
     # extract
     os.chdir(bkp_file_dir)
-    os.makedirs(bkp_file_name)
+    if not os.path.exists(bkp_file_name):
+        os.makedirs(bkp_file_name)
     run_cmd("tar -xvf "+bkp_file_basename+" -C "+bkp_file_name)
     sleep(2)
 
